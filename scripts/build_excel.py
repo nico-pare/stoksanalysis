@@ -58,20 +58,20 @@ def load_records():
 def load_bd():
     """Bigdata.com enrichment records: {symbol: {field: value}}."""
     bd = {}
-    path = os.path.join(OUT_DIR, "bd_enrich.jsonl")
-    if not os.path.exists(path):
-        return bd
-    for line in open(path):
-        line = line.strip().rstrip(",")
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        sym = obj.get("symbol")
-        if sym and obj.get("bd"):
-            bd[sym] = obj["bd"]
+    paths = sorted(glob.glob(os.path.join(OUT_DIR, "bd_enrich.jsonl"))) + \
+        sorted(glob.glob(os.path.join(OUT_DIR, "bd_part_*.jsonl")))
+    for path in paths:
+        for line in open(path):
+            line = line.strip().rstrip(",")
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            sym = obj.get("symbol")
+            if sym and obj.get("bd") and obj["bd"].get("company_name"):
+                bd[sym] = obj["bd"]
     return bd
 
 
