@@ -39,7 +39,7 @@ def pct(v):
 
 def load_records():
     recs = {}
-    for path in sorted(glob.glob(os.path.join(OUT_DIR, "*.jsonl"))):
+    for path in sorted(glob.glob(os.path.join(OUT_DIR, "chunk_*.jsonl"))):
         with open(path) as f:
             for line in f:
                 line = line.strip().rstrip(",")
@@ -55,82 +55,127 @@ def load_records():
     return recs
 
 
-def build_row(sym, obj):
+def load_bd():
+    """Bigdata.com enrichment records: {symbol: {field: value}}."""
+    bd = {}
+    path = os.path.join(OUT_DIR, "bd_enrich.jsonl")
+    if not os.path.exists(path):
+        return bd
+    for line in open(path):
+        line = line.strip().rstrip(",")
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        sym = obj.get("symbol")
+        if sym and obj.get("bd"):
+            bd[sym] = obj["bd"]
+    return bd
+
+
+def coalesce(*vals):
+    for v in vals:
+        if v is not None and v != "":
+            return v
+    return None
+
+
+def build_row(sym, obj, b):
     p = obj.get("profile") or {}
     r = obj.get("ratios") or {}
     t = obj.get("target") or {}
     g = obj.get("grades") or {}
+    b = b or {}  # Bigdata enrichment
 
-    price = num(p.get("price"))
-    tcons = num(t.get("targetConsensus"))
+    price = coalesce(num(p.get("price")), num(b.get("price")))
+
+    # analyst price target (12M forecast): FMP first, then Bigdata
+    tcons = coalesce(num(t.get("targetConsensus")), num(b.get("target_consensus")))
+    thigh = coalesce(num(t.get("targetHigh")), num(b.get("target_high")))
+    tlow = coalesce(num(t.get("targetLow")), num(b.get("target_low")))
+    tmed = coalesce(num(t.get("targetMedian")), num(b.get("target_median")))
     upside = ((tcons / price - 1) * 100) if (price and tcons) else None
 
-    sb = num(g.get("strongBuy")) or 0
-    b = num(g.get("buy")) or 0
-    h = num(g.get("hold")) or 0
-    s = num(g.get("sell")) or 0
-    ss = num(g.get("strongSell")) or 0
-    total = sb + b + h + s + ss
-    pct_buy = ((sb + b) / total * 100) if total else None
+    # analyst ratings: FMP first, then Bigdata
+    grades = g if g else {
+        "strongBuy": b.get("strong_buy"), "buy": b.get("buy"), "hold": b.get("hold"),
+        "sell": b.get("sell"), "strongSell": b.get("strong_sell"), "consensus": b.get("consensus"),
+    }
+    sb = num(grades.get("strongBuy")) or 0
+    bu = num(grades.get("buy")) or 0
+    h = num(grades.get("hold")) or 0
+    s = num(grades.get("sell")) or 0
+    ss = num(grades.get("strongSell")) or 0
+    total = sb + bu + h + s + ss
+    pct_buy = ((sb + bu) / total * 100) if total else None
     pct_sbuy = (sb / total * 100) if total else None
+
+    range_str = p.get("range")
+    if not range_str and b.get("year_low") is not None and b.get("year_high") is not None:
+        range_str = f"{b['year_low']}-{b['year_high']}"
 
     return {
         "Ticker": sym,
-        "Company": p.get("companyName"),
+        "Company": coalesce(p.get("companyName"), b.get("company_name")),
         "In S&P 500": "Yes" if sym in SP500 else "No",
-        "Sector": p.get("sector"),
-        "Industry": p.get("industry"),
-        "Country": p.get("country"),
-        "Exchange": p.get("exchange"),
+        "Sector": coalesce(p.get("sector"), b.get("sector")),
+        "Industry": coalesce(p.get("industry"), b.get("industry")),
+        "Country": coalesce(p.get("country"), b.get("country")),
+        "Exchange": coalesce(p.get("exchange"), b.get("exchange")),
         "Price": price,
-        "1D Chg": num(p.get("change")),
-        "1D Chg %": num(p.get("changePercentage")),
-        "52W Range": p.get("range"),
-        "Market Cap": num(p.get("marketCap")),
-        "Beta": num(p.get("beta")),
-        "Volume": num(p.get("volume")),
-        "Avg Volume": num(p.get("averageVolume")),
+        "1D Chg": coalesce(num(p.get("change")), num(b.get("change"))),
+        "1D Chg %": coalesce(num(p.get("changePercentage")), num(b.get("change_pct"))),
+        "52W Range": range_str,
+        "50D Avg": num(b.get("price_avg_50")),
+        "200D Avg": num(b.get("price_avg_200")),
+        "Market Cap": coalesce(num(p.get("marketCap")), num(b.get("market_cap"))),
+        "Beta": coalesce(num(p.get("beta")), num(b.get("beta"))),
+        "Volume": coalesce(num(p.get("volume")), num(b.get("volume"))),
+        "Avg Volume": coalesce(num(p.get("averageVolume")), num(b.get("avg_volume"))),
         "Forecast 12M (Target)": tcons,
-        "Target High": num(t.get("targetHigh")),
-        "Target Low": num(t.get("targetLow")),
-        "Target Median": num(t.get("targetMedian")),
+        "Target High": thigh,
+        "Target Low": tlow,
+        "Target Median": tmed,
         "Upside to Target %": upside,
         "Analysts": int(total) if total else None,
         "Strong Buy": int(sb) if total else None,
-        "Buy": int(b) if total else None,
+        "Buy": int(bu) if total else None,
         "Hold": int(h) if total else None,
         "Sell": int(s) if total else None,
         "Strong Sell": int(ss) if total else None,
         "% Buy": pct_buy,
         "% Strong Buy": pct_sbuy,
-        "Consensus": g.get("consensus"),
-        "P/E": num(r.get("priceToEarningsRatioTTM")),
-        "PEG": num(r.get("priceToEarningsGrowthRatioTTM")),
-        "P/B": num(r.get("priceToBookRatioTTM")),
-        "P/S": num(r.get("priceToSalesRatioTTM")),
-        "P/FCF": num(r.get("priceToFreeCashFlowRatioTTM")),
-        "Dividend Yield %": pct(r.get("dividendYieldTTM")),
-        "Div/Share": num(r.get("dividendPerShareTTM")) if r.get("dividendPerShareTTM") is not None else num(p.get("lastDividend")),
-        "Payout %": pct(r.get("dividendPayoutRatioTTM")),
-        "EPS (TTM)": num(r.get("netIncomePerShareTTM")),
-        "Rev/Share": num(r.get("revenuePerShareTTM")),
-        "Gross Margin %": pct(r.get("grossProfitMarginTTM")),
-        "Oper Margin %": pct(r.get("operatingProfitMarginTTM")),
-        "Net Margin %": pct(r.get("netProfitMarginTTM")),
-        "Debt/Equity": num(r.get("debtToEquityRatioTTM")),
-        "Current Ratio": num(r.get("currentRatioTTM")),
-        "Employees": num(p.get("fullTimeEmployees")),
-        "CEO": p.get("ceo"),
-        "IPO Date": p.get("ipoDate"),
+        "Consensus": grades.get("consensus"),
+        "P/E": coalesce(num(r.get("priceToEarningsRatioTTM")), num(b.get("pe"))),
+        "PEG": coalesce(num(r.get("priceToEarningsGrowthRatioTTM")), num(b.get("peg"))),
+        "P/B": coalesce(num(r.get("priceToBookRatioTTM")), num(b.get("pb"))),
+        "P/S": coalesce(num(r.get("priceToSalesRatioTTM")), num(b.get("ps"))),
+        "P/FCF": coalesce(num(r.get("priceToFreeCashFlowRatioTTM")), num(b.get("pfcf"))),
+        "Dividend Yield %": coalesce(pct(r.get("dividendYieldTTM")), pct(b.get("div_yield"))),
+        "Div/Share": coalesce(num(r.get("dividendPerShareTTM")), num(b.get("div_per_share")), num(p.get("lastDividend"))),
+        "Payout %": coalesce(pct(r.get("dividendPayoutRatioTTM")), pct(b.get("payout"))),
+        "EPS (TTM)": coalesce(num(r.get("netIncomePerShareTTM")), num(b.get("eps"))),
+        "Rev/Share": coalesce(num(r.get("revenuePerShareTTM")), num(b.get("rev_per_share"))),
+        "Gross Margin %": coalesce(pct(r.get("grossProfitMarginTTM")), pct(b.get("gross_margin"))),
+        "Oper Margin %": coalesce(pct(r.get("operatingProfitMarginTTM")), pct(b.get("oper_margin"))),
+        "Net Margin %": coalesce(pct(r.get("netProfitMarginTTM")), pct(b.get("net_margin"))),
+        "Debt/Equity": coalesce(num(r.get("debtToEquityRatioTTM")), num(b.get("debt_to_equity"))),
+        "Current Ratio": coalesce(num(r.get("currentRatioTTM")), num(b.get("current_ratio"))),
+        "Employees": coalesce(num(p.get("fullTimeEmployees")), num(b.get("employees"))),
+        "CEO": coalesce(p.get("ceo"), b.get("ceo")),
+        "IPO Date": coalesce(p.get("ipoDate"), b.get("ipo_date")),
     }
 
 
-COLUMNS = list(build_row("X", {}).keys())
+COLUMNS = list(build_row("X", {}, {}).keys())
 
 # Number formats per column
 FMT = {
     "Price": "#,##0.00", "1D Chg": "#,##0.00", "1D Chg %": "0.00",
     "Market Cap": "#,##0", "Beta": "0.00", "Volume": "#,##0", "Avg Volume": "#,##0",
+    "50D Avg": "#,##0.00", "200D Avg": "#,##0.00",
     "Forecast 12M (Target)": "#,##0.00", "Target High": "#,##0.00", "Target Low": "#,##0.00",
     "Target Median": "#,##0.00", "Upside to Target %": "0.0", "% Buy": "0.0",
     "% Strong Buy": "0.0", "P/E": "0.00", "PEG": "0.00", "P/B": "0.00", "P/S": "0.00",
@@ -266,7 +311,9 @@ def about_sheet(ws, n_all, n_sp):
 
 def main():
     recs = load_records()
-    rows = [build_row(sym, obj) for sym, obj in recs.items()]
+    bd = load_bd()
+    all_syms = list(recs.keys()) + [s for s in bd if s not in recs]
+    rows = [build_row(sym, recs.get(sym, {}), bd.get(sym)) for sym in all_syms]
     # sort: S&P first, then by market cap desc
     rows.sort(key=lambda r: (0 if r["In S&P 500"] == "Yes" else 1,
                              -(r["Market Cap"] or 0)))
